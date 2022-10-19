@@ -458,7 +458,7 @@ extension FileHandle {
     
     @discardableResult
     func legacySeekToEnd() throws -> UInt64 {
-        if #available(OSX 10.15, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+        if #available(OSX 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
             return try seekToEnd()
         } else {
             return seekToEndOfFile()
@@ -466,7 +466,7 @@ extension FileHandle {
     }
     
     func legacyWrite<T>(contentsOf data: T) throws where T : DataProtocol {
-        if #available(OSX 10.15, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+        if #available(OSX 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
             try write(contentsOf: data)
         } else {
             write(Data(data))
@@ -474,7 +474,7 @@ extension FileHandle {
     }
     
     func legacyReadToEnd() throws -> Data? {
-        if #available(OSX 10.15, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
+        if #available(OSX 10.15.4, iOS 13.4, watchOS 6.2, tvOS 13.4, *) {
             return try readToEnd()
         } else {
             return readDataToEndOfFile()
