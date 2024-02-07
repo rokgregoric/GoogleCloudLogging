@@ -12,5 +12,5 @@ Pod::Spec.new do |s|
   s.watchos.deployment_target = "4.0"
   s.tvos.deployment_target = "11.0"
   s.source   = { :git => "https://github.com/DnV1eX/GoogleCloudLogging.git", :tag => s.version }
-  s.source_files = "Sources/GoogleCloudLogging/*.swift", "Sources/Logging/*.swift"
+  s.source_files = "Sources/GoogleCloudLogging/*.swift"
 end

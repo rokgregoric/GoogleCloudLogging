@@ -19,6 +19,7 @@
 //
 
 import Foundation
+import Logging
 
 /// Customizable SwiftLog logging backend for Google Cloud Logging via REST API v2 with offline functionality.
 public struct GoogleCloudLogHandler: LogHandler {
@@ -202,9 +203,9 @@ public struct GoogleCloudLogHandler: LogHandler {
         
         let isFirstSetup = (logging == nil)
         logging = try GoogleCloudLogging(serviceAccountCredentials: url)
-
-        clientId.map { globalMetadata[MetadataKey.clientId] = .string($0.uuidString) }
-
+        
+        globalMetadata[MetadataKey.clientId] = clientId.map(Logger.MetadataValue.stringConvertible)
+        
         Self.logFile = logFile
         try prepareLogFile()
         
