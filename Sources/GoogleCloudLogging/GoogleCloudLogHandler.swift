@@ -300,17 +300,26 @@ public struct GoogleCloudLogHandler: LogHandler {
         timer.schedule(delay: nil, repeating: uploadInterval)
     }
     
-    
     static func uploadOnSchedule() {
-        
+        upload {}
+    }
+    
+    public static func upload(completion: @escaping () -> Void) {
         logger.debug("Start uploading logs")
+        
+        func done() {
+            logger.debug("Uploading logs done")
+            DispatchQueue.main.async {
+                completion()
+            }
+        }
         
         fileHandleQueue.async {
             do {
                 let fileHandle = try FileHandle(forReadingFrom: logFile)
                 guard let data = try fileHandle.legacyReadToEnd(), !data.isEmpty else {
                     logger.debug("No logs to upload")
-                    return
+                    return done()
                 }
                 
                 var lines = data.split(separator: .newline)
@@ -382,7 +391,7 @@ public struct GoogleCloudLogHandler: LogHandler {
                 guard let logging = logging else {
                     logger.critical("Attempt to upload logs without GoogleCloudLogHandler setup")
                     updateOldEntries()
-                    return
+                    return done()
                 }
                 
                 logging.write(entries: logEntries) { result in
@@ -404,10 +413,12 @@ public struct GoogleCloudLogHandler: LogHandler {
                             }
                             updateOldEntries()
                         }
+                        done()
                     }
                 }
             } catch {
                 logger.error("Unable to read saved logs", metadata: [MetadataKey.error: "\(error)"])
+                done()
             }
         }
     }
