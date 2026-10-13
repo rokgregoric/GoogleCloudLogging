@@ -28,6 +28,7 @@ class GoogleCloudLogging {
     }
     
     enum TokenRequestError: Error {
+        case backoff(until: Date)
         case invalidURL(String)
         case noDataReceived(URLResponse?)
         case errorReceived(Response.Error)
@@ -166,6 +167,9 @@ class GoogleCloudLogging {
         var isExpired: Bool { receiptDate + TimeInterval(expiresIn) < Date() }
     }
     
+    /// Fetches a write-only access token from the app's own backend instead of signing with a bundled key.
+    typealias TokenProvider = (@escaping (Result<GoogleCloudLogHandler.AccessToken, Error>) -> Void) -> Void
+    
     
     struct Log: Encodable {
         struct MonitoredResource: Encodable {
@@ -206,7 +210,13 @@ class GoogleCloudLogging {
     }
     
     
-    let serviceAccountCredentials: Credentials
+    let serviceAccountCredentials: Credentials?
+    let tokenProvider: TokenProvider?
+    /// From the credentials, or from the latest provided token.
+    private var projectId: String?
+    /// After a failed token request, the next one waits (5 s doubling to 15 min); entries stay queued meanwhile.
+    private var tokenFailures = 0
+    private var nextTokenRequest = Date.distantPast
     
     private var accessToken: Token?
     
@@ -223,6 +233,19 @@ class GoogleCloudLogging {
         guard credentials.type == "service_account" else { throw InitError.wrongCredentialsType(credentials) }
         
         serviceAccountCredentials = credentials
+        tokenProvider = nil
+        projectId = credentials.projectId
+        
+        let operationQueue = OperationQueue()
+        operationQueue.underlyingQueue = completionHandlerQueue
+        session = URLSession(configuration: .ephemeral, delegate: nil, delegateQueue: operationQueue)
+    }
+    
+    
+    init(tokenProvider: @escaping TokenProvider) {
+        
+        serviceAccountCredentials = nil
+        self.tokenProvider = tokenProvider
         
         let operationQueue = OperationQueue()
         operationQueue.underlyingQueue = completionHandlerQueue
@@ -232,16 +255,28 @@ class GoogleCloudLogging {
     
     func requestToken(completionHandler: @escaping (Result<Token, Error>) -> Void) {
         
+        if let tokenProvider = tokenProvider {
+            tokenProvider { result in
+                self.completionHandlerQueue.async {
+                    completionHandler(result.map {
+                        self.projectId = $0.projectId
+                        return Token(accessToken: $0.accessToken, expiresIn: $0.expiresIn, tokenType: "Bearer")
+                    })
+                }
+            }
+            return
+        }
+        guard let serviceAccountCredentials = serviceAccountCredentials else { return }
         completionHandlerQueue.async {
-            guard let url = URL(string: self.serviceAccountCredentials.tokenURI) else {
-                completionHandler(.failure(TokenRequestError.invalidURL(self.serviceAccountCredentials.tokenURI)))
+            guard let url = URL(string: serviceAccountCredentials.tokenURI) else {
+                completionHandler(.failure(TokenRequestError.invalidURL(serviceAccountCredentials.tokenURI)))
                 return
             }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             do {
-                let jwt = try JWT.create(using: self.serviceAccountCredentials, for: [.loggingWrite])
+                let jwt = try JWT.create(using: serviceAccountCredentials, for: [.loggingWrite])
                 request.httpBody = try JSONEncoder().encode(["grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": jwt])
             } catch {
                 completionHandler(.failure(error))
@@ -267,6 +302,8 @@ class GoogleCloudLogging {
         accessTokenQueue.async {
             if let token = self.accessToken, !token.isExpired {
                 self.write(entries: entries, token: token, completionHandler: completionHandler)
+            } else if self.nextTokenRequest > Date() {
+                completionHandler(.failure(TokenRequestError.backoff(until: self.nextTokenRequest)))
             } else {
                 let tokenReference = Referenced<Token>()
                 let tokenRequestSemaphore = DispatchSemaphore(value: 0)
@@ -274,9 +311,13 @@ class GoogleCloudLogging {
                     switch result {
                     case let .success(token):
                         tokenReference.wrappedValue = token
+                        self.tokenFailures = 0
+                        self.nextTokenRequest = .distantPast
                         tokenRequestSemaphore.signal()
                         self.write(entries: entries, token: token, completionHandler: completionHandler)
                     case let .failure(error):
+                        self.tokenFailures = min(self.tokenFailures + 1, 20)
+                        self.nextTokenRequest = Date() + min(15 * 60, 5 * pow(2, Double(self.tokenFailures - 1)))
                         tokenRequestSemaphore.signal()
                         completionHandler(.failure(error))
                     }
@@ -301,6 +342,10 @@ class GoogleCloudLogging {
                 completionHandler(.failure(EntriesWriteError.tokenExpired(token)))
                 return
             }
+            guard let projectId = self.projectId else {
+                completionHandler(.failure(EntriesWriteError.tokenExpired(token)))
+                return
+            }
             let url = URL(string: "https://logging.googleapis.com/v2/entries:write")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -311,10 +356,10 @@ class GoogleCloudLogging {
                 encoder.dateEncodingStrategy = .iso8601WithNanoseconds
                 let entries: [Log.Entry] = entries.map {
                     var entry = $0
-                    entry.logName = Log.name(projectId: self.serviceAccountCredentials.projectId, logId: $0.logName)
+                    entry.logName = Log.name(projectId: projectId, logId: $0.logName)
                     return entry
                 }
-                request.httpBody = try encoder.encode(Log(resource: .global(projectId: self.serviceAccountCredentials.projectId), entries: entries))
+                request.httpBody = try encoder.encode(Log(resource: .global(projectId: projectId), entries: entries))
             } catch {
                 completionHandler(.failure(error))
                 return
@@ -324,7 +369,11 @@ class GoogleCloudLogging {
                 completionHandler(Result {
                     if let error = error { throw error }
                     guard let data = data else { throw EntriesWriteError.noDataReceived(response) }
-                    if let responseError = try JSONDecoder().decode(Response.self, from: data).error { throw EntriesWriteError.errorReceived(responseError) }
+                    if let responseError = try JSONDecoder().decode(Response.self, from: data).error {
+                        // Revoked or expired early: forget it, the next round asks for a new one. Entries stay queued.
+                        if responseError.code == 401 { self.accessTokenQueue.async { self.accessToken = nil } }
+                        throw EntriesWriteError.errorReceived(responseError)
+                    }
                 })
             }.resume()
         }

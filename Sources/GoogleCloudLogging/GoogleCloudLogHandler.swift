@@ -223,6 +223,57 @@ public struct GoogleCloudLogHandler: LogHandler {
         }
     }
     
+    /// A write-only access token issued by the app's backend (which keeps the service-account key).
+    public struct AccessToken {
+        public let accessToken: String
+        /// Seconds the token stays valid, counted from receipt (relative, so a wrong device clock can't mis-expire it).
+        public let expiresIn: Int
+        public let projectId: String
+        
+        public init(accessToken: String, expiresIn: Int, projectId: String) {
+            self.accessToken = accessToken
+            self.expiresIn = expiresIn
+            self.projectId = projectId
+        }
+    }
+    
+    /// Setup `GoogleCloudLogHandler` without credentials in the app: tokens come from `tokenProvider`.
+    ///
+    /// It must be called once, usually right after the app has been launched. Entries stay in the log file until a
+    /// token is available and the upload succeeds; a failed token request backs off (5 s doubling to 15 min), and a
+    /// 401 from Google drops the cached token so the next round asks for a new one.
+    ///
+    /// - Parameters:
+    ///     - tokenProvider: Called when no valid token is cached; completes with a token or an error.
+    ///     - clientId: The unique identifier for the client app instance that is added to each log entry and used to group and differ logs.
+    ///     - logFile: Optional custom log file URL.
+    ///
+    /// - Throws: `Error` if unable to access or create the log file.
+    ///
+    public static func setup(tokenProvider: @escaping (@escaping (Result<AccessToken, Error>) -> Void) -> Void, clientId: UUID?, logFile: URL = logFile) throws {
+        
+        let isFirstSetup = (logging == nil)
+        logging = GoogleCloudLogging(tokenProvider: tokenProvider)
+        
+        globalMetadata[MetadataKey.clientId] = clientId.map(Logger.MetadataValue.stringConvertible)
+        
+        Self.logFile = logFile
+        try prepareLogFile()
+        
+        upload()
+        
+        DispatchQueue.main.async { // Async in case setup before LoggingSystem bootstrap.
+            if isFirstSetup {
+                logger.info("GoogleCloudLogHandler has been setup", metadata: [MetadataKey.logFile: "\(logFile)"])
+            } else {
+                logger.warning("Repeated setup of GoogleCloudLogHandler", metadata: [MetadataKey.logFile: "\(logFile)"])
+                fileHandleQueue.async { // Assert in fileHandleQueue so warning is saved.
+                    assertionFailure("App should only setup GoogleCloudLogHandler once")
+                }
+            }
+        }
+    }
+    
     /// Use as `GoogleCloudLogHandler` factory for `LoggingSystem.bootstrap()` and `Logger.init()`.
     ///
     /// - Parameter label: Forwarded `logger.label` which is typically the enclosing class name.
